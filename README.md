@@ -130,9 +130,12 @@ stay as they are.
 
 ## A note on versions
 
-Built on `@modelcontextprotocol/sdk` 1.29.0, the current stable line. The v2 SDK
-splits into `@modelcontextprotocol/server` and friends and is still in beta at
-the time of writing; this starter will move when it stabilises.
+Built on `@modelcontextprotocol/sdk` 1.32.0, the latest 1.x release. The v2 SDK
+(`@modelcontextprotocol/server`) is stable now, but it no longer ships the
+authorization-server helpers (`mcpAuthRouter` and `OAuthServerProvider`) that this
+starter's built-in OAuth server is built on; they live on only in a frozen,
+deprecated `@modelcontextprotocol/server-legacy` package. This starter stays on 1.x
+until v2 has an authorization story that keeps the one-click deploy.
 
 ## License
 

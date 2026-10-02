@@ -24,7 +24,7 @@ The tools are the easy part. What takes the time is everything around them:
 
 ### Deployment Dependencies
 
-- [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) 1.29.0 — server, Streamable HTTP transport, OAuth endpoints
+- [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) 1.32.0 — server, Streamable HTTP transport, OAuth endpoints
 - Node 24 and Express 5
 - Postgres — OAuth clients, authorization codes, tokens, and the example table
 - [Source repository](https://github.com/ak40u/mcp-server-railway-starter)
