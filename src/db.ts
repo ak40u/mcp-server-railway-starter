@@ -5,7 +5,7 @@
  * tokens - because the server is stateless: any replica has to be able to
  * verify a token issued by any other one.
  */
-import { Pool } from "pg"
+import { Pool, type PoolClient } from "pg"
 
 import { env } from "./env.js"
 
@@ -59,6 +59,18 @@ create table if not exists oauth_tokens (
 
 create index if not exists oauth_tokens_client_idx on oauth_tokens (client_id);
 
+-- Additive columns, nullable so rows written by an earlier version stay valid.
+-- grant_id ties a code and every token descended from it into one family, so
+-- reuse of a spent credential can revoke the whole family. rotated_at marks a
+-- refresh token that was spent by rotation, as opposed to revoked on request.
+-- Rows without a grant_id (issued before these columns) keep working; they join
+-- a family the first time they are used.
+alter table oauth_codes  add column if not exists grant_id text;
+alter table oauth_tokens add column if not exists grant_id text;
+alter table oauth_tokens add column if not exists rotated_at timestamptz;
+create index if not exists oauth_tokens_grant_idx on oauth_tokens (grant_id);
+create index if not exists oauth_codes_grant_idx on oauth_codes (grant_id);
+
 create table if not exists login_attempts (
   ip                  text not null,
   attempted_at        timestamptz not null default now()
@@ -76,8 +88,22 @@ create table if not exists notes (
 );
 `
 
+// Replicas start together on a deploy. Concurrent DDL against the same table
+// can fail on catalog races, so one replica migrates while the others wait.
+const MIGRATION_LOCK_KEY = 7_204_113
+
 export async function migrate(): Promise<void> {
-  await pool.query(SCHEMA)
+  const client = await pool.connect()
+  try {
+    await client.query("select pg_advisory_lock($1)", [MIGRATION_LOCK_KEY])
+    try {
+      await client.query(SCHEMA)
+    } finally {
+      await client.query("select pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY])
+    }
+  } finally {
+    client.release()
+  }
 }
 
 /**
@@ -90,4 +116,20 @@ export async function sweepExpired(): Promise<void> {
   await pool.query(`delete from oauth_tokens where expires_at < now() - interval '1 day'`)
   await pool.query(`delete from oauth_pending_authorizations where created_at < now() - interval '1 hour'`)
   await pool.query(`delete from login_attempts where attempted_at < now() - interval '1 day'`)
+}
+
+/** Runs `work` in one transaction: everything it wrote is kept, or none of it. */
+export async function inTransaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect()
+  try {
+    await client.query("begin")
+    const result = await work(client)
+    await client.query("commit")
+    return result
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined)
+    throw error
+  } finally {
+    client.release()
+  }
 }

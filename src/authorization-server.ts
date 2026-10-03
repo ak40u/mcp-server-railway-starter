@@ -38,6 +38,42 @@ export function buildOAuthMetadata(issuer: URL, scopes: string[]): OAuthMetadata
   }
 }
 
+/** Whether the redirect target is the user's own machine, where http is acceptable and a port may vary. */
+export function isLoopbackRedirect(uri: string): boolean {
+  try {
+    return LOOPBACK_HOSTS.has(new URL(uri).hostname)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * MCP authorization: redirect URIs must be https or loopback http. Native apps
+ * may also use a private-use scheme named after a domain they control (RFC 8252
+ * section 7.1), which always contains a dot. Fragments are forbidden (OAuth 2.1).
+ */
+export function redirectUriProblem(uri: string): string | undefined {
+  let url: URL
+  try {
+    url = new URL(uri)
+  } catch {
+    return "redirect_uri is not a valid URL"
+  }
+  if (url.hash) return "redirect_uri must not contain a fragment"
+  if (url.username || url.password) return "redirect_uri must not contain credentials"
+  if (url.protocol === "https:") return undefined
+  if (url.protocol === "http:") {
+    return LOOPBACK_HOSTS.has(url.hostname) ? undefined : "http redirect_uri is only allowed for localhost; use https"
+  }
+  const scheme = url.protocol.slice(0, -1)
+  return scheme.includes(".") ? undefined : "redirect_uri scheme must be https, http on localhost, or a reverse-domain private-use scheme"
+}
+
+/** Space-separated scope string to a list; blanks are not scopes. */
+function splitScopes(scope: string | undefined): string[] {
+  return scope === undefined ? [] : scope.split(/\s+/).filter(Boolean)
+}
+
 /** RFC 8252: a loopback redirect may differ from the registered one only in its port. */
 export function redirectUriMatches(requested: string, registered: string): boolean {
   if (requested === registered) return true
@@ -62,9 +98,10 @@ function sendOAuthError(res: Response, error: unknown): void {
   res.status(500).json(new OAuthError(OAuthErrorCode.ServerError, "Internal Server Error").toResponseObject())
 }
 
+/** Preflights are answered by `cors` before this runs, so OPTIONS is not special here: an endpoint without CORS must not run its handler for one. */
 function allowedMethods(methods: string[]): RequestHandler {
   return (req, res, next) => {
-    if (req.method === "OPTIONS" || methods.includes(req.method)) return next()
+    if (methods.includes(req.method)) return next()
     res
       .status(405)
       .set("Allow", methods.join(", "))
@@ -142,7 +179,8 @@ const AuthorizeClientParams = z.object({
 
 const AuthorizeRequestParams = z.object({
   response_type: z.literal("code"),
-  code_challenge: z.string(),
+  // RFC 7636 section 4.2: the base64url of a SHA-256 digest, always 43 characters.
+  code_challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/, "code_challenge must be a 43-character base64url S256 challenge"),
   code_challenge_method: z.literal("S256"),
   scope: z.string().optional(),
   state: z.string().optional(),
@@ -170,7 +208,7 @@ function errorRedirect(redirectUri: string, error: OAuthError, state?: string): 
   return target.href
 }
 
-export function authorizationServerRouter(provider: PostgresOAuthProvider): Router {
+export function authorizationServerRouter(provider: PostgresOAuthProvider, supportedScopes: string[]): Router {
   const router = Router()
   const form = express.urlencoded({ extended: false })
 
@@ -188,10 +226,22 @@ export function authorizationServerRouter(provider: PostgresOAuthProvider): Rout
         const parsed = OAuthClientMetadataSchema.safeParse(req.body)
         if (!parsed.success) throw new OAuthError(OAuthErrorCode.InvalidClientMetadata, parsed.error.message)
 
-        const isPublic = parsed.data.token_endpoint_auth_method === "none"
+        for (const uri of parsed.data.redirect_uris) {
+          const problem = redirectUriProblem(uri)
+          if (problem) throw new OAuthError(OAuthErrorCode.InvalidRedirectUri, problem)
+        }
+        // Only the methods the metadata advertises. A client that sent none gets
+        // client_secret_post, and the response says so (RFC 7591 section 3.2.1
+        // lets the server substitute), so it knows how to present its secret.
+        const requestedMethod = parsed.data.token_endpoint_auth_method
+        if (requestedMethod !== undefined && !["none", "client_secret_post", "client_secret_basic"].includes(requestedMethod)) {
+          throw new OAuthError(OAuthErrorCode.InvalidClientMetadata, `token_endpoint_auth_method ${requestedMethod} is not supported`)
+        }
+        const isPublic = requestedMethod === "none"
         const issuedAt = Math.floor(Date.now() / 1000)
         const client: OAuthClientInformationFull = {
           ...parsed.data,
+          token_endpoint_auth_method: isPublic ? "none" : "client_secret_post",
           client_id: randomUUID(),
           client_id_issued_at: issuedAt,
           client_secret: isPublic ? undefined : randomBytes(32).toString("hex"),
@@ -244,11 +294,15 @@ export function authorizationServerRouter(provider: PostgresOAuthProvider): Rout
         throw new OAuthError(OAuthErrorCode.InvalidRequest, request.error.message)
       }
       state = request.data.state
+      const requestedScopes = splitScopes(request.data.scope)
+      const unknown = requestedScopes.filter((s) => !supportedScopes.includes(s))
+      if (unknown.length) throw new OAuthError(OAuthErrorCode.InvalidScope, `Unsupported scope: ${unknown.join(" ")}`)
+      const scopes = requestedScopes.length ? requestedScopes : supportedScopes
       await provider.authorize(
         client,
         {
           state,
-          scopes: request.data.scope === undefined ? [] : request.data.scope.split(" "),
+          scopes,
           redirectUri,
           codeChallenge: request.data.code_challenge,
           resource: request.data.resource ? new URL(request.data.resource) : undefined,
@@ -293,7 +347,7 @@ export function authorizationServerRouter(provider: PostgresOAuthProvider): Rout
             const grant = RefreshTokenGrant.safeParse(req.body)
             if (!grant.success) throw new OAuthError(OAuthErrorCode.InvalidRequest, grant.error.message)
             const { refresh_token, scope, resource } = grant.data
-            res.json(await provider.exchangeRefreshToken(client, refresh_token, scope?.split(" "), resource ? new URL(resource) : undefined))
+            res.json(await provider.exchangeRefreshToken(client, refresh_token, splitScopes(scope), resource ? new URL(resource) : undefined))
             return
           }
           default:

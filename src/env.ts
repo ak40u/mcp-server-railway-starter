@@ -26,6 +26,18 @@ if (!publicUrl) {
 // slash, no path.
 const issuer = new URL(publicUrl).origin
 
+/** An optional whole-number variable; anything else stops the boot instead of becoming NaN later. */
+function integer(name: string, fallback: number, min: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw === "") return fallback
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < min) {
+    console.error(`${name} must be a whole number of at least ${min}, got "${raw}".`)
+    process.exit(1)
+  }
+  return value
+}
+
 const adminPassword = required("MCP_ADMIN_PASSWORD")
 
 if (adminPassword.length < 12) {
@@ -34,15 +46,18 @@ if (adminPassword.length < 12) {
 }
 
 export const env = {
-  port: Number(process.env.PORT ?? 8080),
+  port: integer("PORT", 8080, 1),
   databaseUrl: required("DATABASE_URL"),
   issuer,
   adminPassword,
   serverName: process.env.MCP_SERVER_NAME || "mcp-starter",
   // Access tokens stay short because there is a refresh token behind them; an
   // hour bounds the damage from a leaked one without making clients reconnect.
-  accessTokenTtlSeconds: Number(process.env.ACCESS_TOKEN_TTL_SECONDS ?? 3600),
-  refreshTokenTtlSeconds: Number(process.env.REFRESH_TOKEN_TTL_SECONDS ?? 60 * 60 * 24 * 30),
+  accessTokenTtlSeconds: integer("ACCESS_TOKEN_TTL_SECONDS", 3600, 1),
+  refreshTokenTtlSeconds: integer("REFRESH_TOKEN_TTL_SECONDS", 60 * 60 * 24 * 30, 1),
+  // How many reverse proxies sit between the internet and this process. Railway
+  // puts exactly one in front; add a CDN and it becomes two. 0 means none.
+  trustProxyHops: integer("TRUST_PROXY_HOPS", 1, 0),
   authorizationCodeTtlSeconds: 60,
   scopes: ["mcp:tools"],
 }

@@ -67,7 +67,10 @@ npx tsx scripts/verify-oauth-flow.ts https://<your-domain> '<the password>'
 The script walks the whole path a real client walks — discovery, registration,
 PKCE, login, token exchange, `tools/call` — and also checks the parts that are
 supposed to fail: an unauthenticated call, a wrong password, a replayed
-authorization code.
+authorization code, a reused refresh token, weak PKCE, unsafe redirect URIs,
+unknown scopes, script injected into the login page, and a burst of parallel
+password guesses. That last check locks the addresses it used out of login for
+15 minutes, so against a remote server it only runs with `VERIFY_LOCKOUT=1`.
 
 ## Write your own tools
 
@@ -88,13 +91,32 @@ canned strings — that is what makes a first deploy prove the write path.
 - **PKCE is required** (S256); the code challenge is bound to the code.
 - **Login is rate limited** — 10 attempts per address per 15 minutes, counted in
   Postgres so the limit holds across replicas rather than per process. The
-  address is the one Railway's proxy reports (`trust proxy` is set to one hop), so
-  a client cannot pick its own with an `X-Forwarded-For` header. Registration,
+  address is the one Railway's proxy reports (`trust proxy` defaults to one hop,
+  see `TRUST_PROXY_HOPS`), so a client cannot pick its own with an
+  `X-Forwarded-For` header. Registration,
   authorize, token and revoke have their own per-address limits.
 - **Passwords are compared in constant time**, over hashes, so neither content
   nor length leaks through timing.
-- **Refresh rotates**: using a refresh token revokes it and issues a new pair. A
-  refresh can narrow its scopes, never widen them.
+- **Refresh rotates, and reuse revokes the grant**: using a refresh token revokes
+  it and issues a new pair. A refresh can narrow its scopes, never widen them.
+  Presenting a refresh token that was already rotated, or an authorization code
+  that was already used, revokes every token issued under that authorization,
+  because it means a copy leaked. Revoking a refresh token also revokes its
+  access tokens.
+- **The login page names the client and where the code goes.** Anyone can
+  register a client under any name, so the page shows the name as unverified plus
+  the redirect host, and asks for a confirmation tick when that host is not your
+  own machine. Check the host before you type the password. The page is served
+  with a strict Content-Security-Policy (no scripts, no framing), all dynamic
+  values are escaped, and the request id is validated before it is used.
+- **Registration is validated**: redirect URIs must be `https`, `http` on
+  `localhost`/`127.0.0.1`/`[::1]`, or a reverse-domain app scheme such as
+  `com.example.app:`; fragments are refused. Requested scopes must be in the
+  supported set (`mcp:tools`); unknown scopes get `invalid_scope`. A client that
+  registers without `token_endpoint_auth_method` is told `client_secret_post`.
+- **Login attempts are counted atomically** before the password is checked, so a
+  burst of parallel guesses cannot exceed the limit. IPv6 clients share one budget
+  per /64.
 
 One honest note: client secrets issued by dynamic registration are stored as
 issued, because client authentication compares them directly. MCP
@@ -110,8 +132,19 @@ this server expects.
 | `PUBLIC_URL` | on Railway, filled in | The origin clients reach — becomes the OAuth issuer |
 | `PORT` | no | Defaults to 8080 |
 | `MCP_SERVER_NAME` | no | Name reported to clients |
-| `ACCESS_TOKEN_TTL_SECONDS` | no | Default 3600 |
-| `REFRESH_TOKEN_TTL_SECONDS` | no | Default 2592000 (30 days) |
+| `ACCESS_TOKEN_TTL_SECONDS` | no | Whole seconds, at least 1. Default 3600 |
+| `REFRESH_TOKEN_TTL_SECONDS` | no | Whole seconds, at least 1. Default 2592000 (30 days) |
+| `TRUST_PROXY_HOPS` | no | Reverse proxies in front of the service. Default 1 (Railway's edge). Set 2 behind a CDN such as Cloudflare, 0 when nothing is in front. Too low and every visitor shares one rate-limit budget (anyone can lock you out of login); too high and clients can pick their own address with `X-Forwarded-For`. A bad value in any numeric variable stops the boot. |
+
+## Upgrading
+
+The schema changes are additive and run on startup (one replica migrates while
+the others wait): `grant_id` on codes and tokens, `rotated_at` on tokens. Tokens
+issued by the previous version keep working. A refresh token from before the
+upgrade joins a grant at its first rotation; one that was already rotated before
+the upgrade is rejected as before, but its reuse cannot revoke a family that was
+never recorded. Rolling back to the previous version is safe, the old code
+ignores the new columns.
 
 ## Run locally
 

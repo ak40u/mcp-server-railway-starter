@@ -24,15 +24,15 @@ const app = express()
 const issuerUrl = new URL(env.issuer)
 
 app.disable("x-powered-by")
-// Railway terminates TLS at its edge, through exactly one proxy. A hop count of 1
-// makes Express take the protocol and the client address from what that proxy
+// Railway terminates TLS at its edge, through exactly one proxy (the default;
+// TRUST_PROXY_HOPS changes it, e.g. 2 behind a CDN). A hop count makes Express take the protocol and the client address from what that proxy
 // appended and ignore anything a client put into X-Forwarded-* itself. Without it
 // Express builds redirect URLs as http:// and OAuth clients reject the mismatch.
-app.set("trust proxy", 1)
+app.set("trust proxy", env.trustProxyHops)
 
 // The authorization-server routes bring their own body parsers and CORS, so they
 // go first and nothing global is allowed to consume a request body ahead of them.
-app.use(authorizationServerRouter(provider))
+app.use(authorizationServerRouter(provider, env.scopes))
 app.use(
   mcpAuthMetadataRouter({
     oauthMetadata: buildOAuthMetadata(issuerUrl, env.scopes),
