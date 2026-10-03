@@ -9,8 +9,7 @@
  */
 import { createHash, randomBytes } from "node:crypto"
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js"
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client"
 
 const base = (process.argv[2] ?? "http://127.0.0.1:8123").replace(/\/$/, "")
 const password = process.argv[3] ?? "local-test-password-1"
@@ -164,7 +163,32 @@ async function main() {
     }),
   })
   if (!refreshed.ok) fail("refresh token exchange", `${refreshed.status} ${await refreshed.text()}`)
+  const rotated = await refreshed.json()
   ok("refresh token exchange")
+
+  // 9. Refresh rotates: the old refresh token is spent.
+  const reuse = await fetch(meta.token_endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: client.client_id }),
+  })
+  if (reuse.ok) fail("a used refresh token is rejected", "second refresh succeeded")
+  ok("a used refresh token is rejected")
+
+  // 10. Revocation: the revoked access token stops working at once.
+  const revoke = await fetch(meta.revocation_endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ token: rotated.access_token, client_id: client.client_id }),
+  })
+  if (!revoke.ok) fail("token revocation", `${revoke.status} ${await revoke.text()}`)
+  const afterRevoke = await fetch(`${base}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${rotated.access_token}` },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+  })
+  if (afterRevoke.status !== 401) fail("revoked token is rejected", `got ${afterRevoke.status}`)
+  ok("token revocation", "the revoked access token gets 401")
 
   await transport.close()
   console.log("\nall checks passed")

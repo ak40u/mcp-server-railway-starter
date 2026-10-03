@@ -5,7 +5,7 @@
  * watching. This page is the one point where a person has to prove they are
  * there, so it is also the one point worth rate limiting.
  */
-import { Router, type Request } from "express"
+import { Router } from "express"
 
 import { pool } from "./db.js"
 import { env } from "./env.js"
@@ -13,17 +13,6 @@ import { comparePassword, type PostgresOAuthProvider } from "./oauth-provider.js
 
 const MAX_ATTEMPTS = 10
 const WINDOW_MINUTES = 15
-
-/**
- * The client IP as Railway sees it. Behind the platform proxy the socket
- * address is always internal, so a limiter keyed on it would be a limiter on
- * the whole world at once.
- */
-function clientIp(req: Request): string {
-  const forwarded = req.headers["x-forwarded-for"]
-  const first = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(",")[0]
-  return (first || req.socket.remoteAddress || "unknown").trim()
-}
 
 async function tooManyAttempts(ip: string): Promise<boolean> {
   const { rows } = await pool.query<{ count: string }>(
@@ -83,7 +72,10 @@ export function loginRouter(provider: PostgresOAuthProvider): Router {
   router.post("/login", async (req, res) => {
     const requestId = String(req.body?.request ?? "")
     const password = String(req.body?.password ?? "")
-    const ip = clientIp(req)
+    // Behind the platform proxy the socket address is always internal. `req.ip`
+    // is resolved through `trust proxy`, which counts exactly the proxy hops we
+    // trust, so a client cannot choose its own address with an X-Forwarded-For header.
+    const ip = req.ip ?? "unknown"
 
     if (await tooManyAttempts(ip)) {
       res.status(429).type("html").send(page(requestId, "Too many attempts. Try again later."))

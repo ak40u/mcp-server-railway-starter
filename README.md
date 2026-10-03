@@ -87,14 +87,17 @@ canned strings — that is what makes a first deploy prove the write path.
   by a check-then-write that two concurrent requests can both pass.
 - **PKCE is required** (S256); the code challenge is bound to the code.
 - **Login is rate limited** — 10 attempts per address per 15 minutes, counted in
-  Postgres so the limit holds across replicas rather than per process.
+  Postgres so the limit holds across replicas rather than per process. The
+  address is the one Railway's proxy reports (`trust proxy` is set to one hop), so
+  a client cannot pick its own with an `X-Forwarded-For` header. Registration,
+  authorize, token and revoke have their own per-address limits.
 - **Passwords are compared in constant time**, over hashes, so neither content
   nor length leaks through timing.
 - **Refresh rotates**: using a refresh token revokes it and issues a new pair. A
   refresh can narrow its scopes, never widen them.
 
 One honest note: client secrets issued by dynamic registration are stored as
-issued, because the SDK's client authentication compares them directly. MCP
+issued, because client authentication compares them directly. MCP
 clients normally register as public clients and rely on PKCE, which is the path
 this server expects.
 
@@ -118,24 +121,30 @@ cp .env.example .env
 npm run dev
 ```
 
-The SDK refuses a plain-HTTP issuer except on localhost, which is exactly where
-you will be running it.
+Plain HTTP is fine for the issuer on localhost, which is exactly where you will
+be running it; anywhere else use HTTPS.
 
 ## Using an external identity provider
 
 This server is its own authorization server, which is what makes it deploy in
-one click. If you already run Keycloak, Auth0 or Zitadel, replace `mcpAuthRouter`
-with `mcpAuthMetadataRouter` and point it at your issuer; the tools and transport
-stay as they are.
+one click. If you already run Keycloak, Auth0 or Zitadel, delete
+`src/authorization-server.ts`, `src/oauth-provider.ts` and `src/login.ts`, point
+`mcpAuthMetadataRouter` at your issuer's metadata, and give `requireBearerAuth` a
+verifier for its tokens; the tools and transport stay as they are.
 
 ## A note on versions
 
-Built on `@modelcontextprotocol/sdk` 1.32.0, the latest 1.x release. The v2 SDK
-(`@modelcontextprotocol/server`) is stable now, but it no longer ships the
-authorization-server helpers (`mcpAuthRouter` and `OAuthServerProvider`) that this
-starter's built-in OAuth server is built on; they live on only in a frozen,
-deprecated `@modelcontextprotocol/server-legacy` package. This starter stays on 1.x
-until v2 has an authorization story that keeps the one-click deploy.
+Built on the MCP TypeScript SDK v2: `@modelcontextprotocol/server` 2.3.0 for the
+server and Streamable HTTP handler, `@modelcontextprotocol/express` and
+`@modelcontextprotocol/node` for the Express integration and bearer-token
+check. The v2 SDK is a resource-server library: it verifies tokens and publishes
+metadata but no longer ships an authorization server (the v1 helpers survive only
+in the deprecated `@modelcontextprotocol/server-legacy`, which this starter does
+not use). The OAuth endpoints — `/register`, `/authorize`, `/token`, `/revoke`
+and the metadata document — are therefore implemented in
+`src/authorization-server.ts` on top of the same Postgres schema, with the same
+request and error formats as before, so existing deployments and registered
+clients keep working.
 
 ## License
 

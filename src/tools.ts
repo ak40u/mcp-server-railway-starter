@@ -6,8 +6,7 @@
  * database write - and they are the place to replace with your own.
  */
 import { z } from "zod"
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js"
+import { McpServer, type AuthInfo } from "@modelcontextprotocol/server"
 
 import { pool } from "./db.js"
 import { env } from "./env.js"
@@ -25,7 +24,7 @@ export function buildServer(auth: AuthInfo | undefined): McpServer {
     {
       title: "Add note",
       description: "Store a note with a title and a body.",
-      inputSchema: { title: z.string().min(1).max(200), body: z.string().min(1).max(20_000) },
+      inputSchema: z.object({ title: z.string().min(1).max(200), body: z.string().min(1).max(20_000) }),
     },
     async ({ title, body }) => {
       const { rows } = await pool.query<{ id: string }>(
@@ -41,7 +40,7 @@ export function buildServer(auth: AuthInfo | undefined): McpServer {
     {
       title: "Search notes",
       description: "Find notes whose title or body contains the query.",
-      inputSchema: { query: z.string().min(1).max(200), limit: z.number().int().min(1).max(50).optional() },
+      inputSchema: z.object({ query: z.string().min(1).max(200), limit: z.number().int().min(1).max(50).optional() }),
     },
     async ({ query, limit }) => {
       const { rows } = await pool.query<{ id: string; title: string; body: string }>(
@@ -60,7 +59,6 @@ export function buildServer(auth: AuthInfo | undefined): McpServer {
     {
       title: "Who am I",
       description: "Report the OAuth client and scopes behind the current call.",
-      inputSchema: {},
     },
     async () => {
       if (!auth) return text("No token was presented.")

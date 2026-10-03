@@ -8,10 +8,11 @@
  */
 import express from "express"
 
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
-import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js"
-import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js"
+import { getOAuthProtectedResourceMetadataUrl, mcpAuthMetadataRouter, requireBearerAuth } from "@modelcontextprotocol/express"
+import { toNodeHandler } from "@modelcontextprotocol/node"
+import { createMcpHandler } from "@modelcontextprotocol/server"
 
+import { authorizationServerRouter, buildOAuthMetadata } from "./authorization-server.js"
 import { migrate, pool, sweepExpired } from "./db.js"
 import { env } from "./env.js"
 import { loginRouter } from "./login.js"
@@ -20,19 +21,22 @@ import { buildServer } from "./tools.js"
 
 const provider = new PostgresOAuthProvider()
 const app = express()
+const issuerUrl = new URL(env.issuer)
 
 app.disable("x-powered-by")
-// Railway terminates TLS at its edge; without this Express builds redirect URLs
-// as http:// and OAuth clients reject the mismatch.
-app.set("trust proxy", true)
+// Railway terminates TLS at its edge, through exactly one proxy. A hop count of 1
+// makes Express take the protocol and the client address from what that proxy
+// appended and ignore anything a client put into X-Forwarded-* itself. Without it
+// Express builds redirect URLs as http:// and OAuth clients reject the mismatch.
+app.set("trust proxy", 1)
 
-// The SDK's routers bring their own body parsers and CORS, so they go first and
-// nothing global is allowed to consume a request body ahead of them.
+// The authorization-server routes bring their own body parsers and CORS, so they
+// go first and nothing global is allowed to consume a request body ahead of them.
+app.use(authorizationServerRouter(provider))
 app.use(
-  mcpAuthRouter({
-    provider,
-    issuerUrl: new URL(env.issuer),
-    resourceServerUrl: new URL(env.issuer),
+  mcpAuthMetadataRouter({
+    oauthMetadata: buildOAuthMetadata(issuerUrl, env.scopes),
+    resourceServerUrl: issuerUrl,
     resourceName: env.serverName,
     scopesSupported: env.scopes,
   }),
@@ -43,7 +47,7 @@ app.use(express.urlencoded({ extended: false }), loginRouter(provider))
 const bearer = requireBearerAuth({
   verifier: provider,
   requiredScopes: [],
-  resourceMetadataUrl: `${env.issuer}/.well-known/oauth-protected-resource`,
+  resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(issuerUrl),
 })
 
 app.use("/mcp", (req, res, next) => {
@@ -57,24 +61,16 @@ app.use("/mcp", (req, res, next) => {
   next()
 })
 
-app.post("/mcp", express.json({ limit: "4mb" }), bearer, async (req, res) => {
-  const server = buildServer(req.auth)
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
+// The factory runs once per request, so a fresh server answers every call and
+// nothing is held between requests; the caller's token reaches the tools as authInfo.
+const mcp = createMcpHandler(({ authInfo }) => buildServer(authInfo))
+const serveMcp = toNodeHandler(mcp)
 
-  // One server and one transport per request; both are torn down when the
-  // client disconnects, otherwise a dropped connection leaks a live instance.
-  res.on("close", () => {
-    void transport.close()
-    void server.close()
-  })
-
-  try {
-    await server.connect(transport)
-    await transport.handleRequest(req, res, req.body)
-  } catch (error) {
+app.post("/mcp", express.json({ limit: "4mb" }), bearer, (req, res) => {
+  void serveMcp(req, res, req.body).catch((error: unknown) => {
     console.error("mcp request failed", error)
     if (!res.headersSent) res.status(500).json({ error: "internal_error" })
-  }
+  })
 })
 
 // Stateless mode has no stream to resume and no session to end, so the other
@@ -113,7 +109,7 @@ async function main() {
   for (const signal of ["SIGTERM", "SIGINT"] as const) {
     process.on(signal, () => {
       clearInterval(sweeper)
-      server.close(() => void pool.end().then(() => process.exit(0)))
+      void mcp.close().finally(() => server.close(() => void pool.end().then(() => process.exit(0))))
     })
   }
 }

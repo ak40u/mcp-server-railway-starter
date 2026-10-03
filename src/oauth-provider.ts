@@ -1,23 +1,24 @@
 /**
  * OAuth 2.1 authorization server, backed by Postgres.
  *
- * The MCP SDK supplies the endpoints (discovery, dynamic registration, token,
- * revocation); this file supplies the decisions behind them. Everything is
+ * `authorization-server.ts` supplies the HTTP endpoints (discovery, dynamic
+ * registration, token, revocation); this file supplies the decisions behind
+ * them. Everything is
  * stored server-side and hashed, so no replica has to remember anything and a
  * database dump does not hand over working credentials.
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import type { Response } from "express"
 
-import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js"
-import type { AuthorizationParams, OAuthServerProvider } from "@modelcontextprotocol/sdk/server/auth/provider.js"
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js"
-import type {
-  OAuthClientInformationFull,
-  OAuthTokenRevocationRequest,
-  OAuthTokens,
-} from "@modelcontextprotocol/sdk/shared/auth.js"
-import { InvalidGrantError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js"
+import {
+  OAuthError,
+  OAuthErrorCode,
+  type AuthInfo,
+  type OAuthClientInformationFull,
+  type OAuthTokenRevocationRequest,
+  type OAuthTokens,
+  type OAuthTokenVerifier,
+} from "@modelcontextprotocol/server"
 
 import { pool } from "./db.js"
 import { env } from "./env.js"
@@ -33,7 +34,18 @@ export function comparePassword(candidate: string, expected: string): boolean {
   return timingSafeEqual(a, b)
 }
 
-class PostgresClientsStore implements OAuthRegisteredClientsStore {
+/** What /authorize hands over once the client and redirect URI are validated. */
+export interface AuthorizationParams {
+  state?: string
+  scopes?: string[]
+  codeChallenge: string
+  redirectUri: string
+  resource?: URL
+}
+
+const invalidGrant = (message: string) => new OAuthError(OAuthErrorCode.InvalidGrant, message)
+
+class PostgresClientsStore {
   async getClient(clientId: string): Promise<OAuthClientInformationFull | undefined> {
     const { rows } = await pool.query<{ client_info: OAuthClientInformationFull }>(
       `select client_info from oauth_clients where client_id = $1`,
@@ -52,12 +64,12 @@ class PostgresClientsStore implements OAuthRegisteredClientsStore {
   }
 }
 
-export class PostgresOAuthProvider implements OAuthServerProvider {
+export class PostgresOAuthProvider implements OAuthTokenVerifier {
   readonly clientsStore = new PostgresClientsStore()
 
   /**
-   * The SDK has already validated the request against the registered client by
-   * the time we get here. What is left is proving the human is present, so the
+   * The endpoint has already validated the request against the registered
+   * client by the time we get here. What is left is proving the human is present, so the
    * flow parks the request and hands the browser to the login page.
    */
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
@@ -111,14 +123,13 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
       `select code_challenge from oauth_codes where code_hash = $1 and consumed_at is null and expires_at > now()`,
       [hash(authorizationCode)],
     )
-    if (!rows[0]) throw new InvalidGrantError("Authorization code is invalid or expired")
+    if (!rows[0]) throw invalidGrant("Authorization code is invalid or expired")
     return rows[0].code_challenge
   }
 
   async exchangeAuthorizationCode(
     client: OAuthClientInformationFull,
     authorizationCode: string,
-    _codeVerifier?: string,
     redirectUri?: string,
     resource?: URL,
   ): Promise<OAuthTokens> {
@@ -131,8 +142,8 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
       [hash(authorizationCode), client.client_id],
     )
     const code = rows[0]
-    if (!code) throw new InvalidGrantError("Authorization code is invalid, expired or already used")
-    if (redirectUri && redirectUri !== code.redirect_uri) throw new InvalidGrantError("redirect_uri does not match")
+    if (!code) throw invalidGrant("Authorization code is invalid, expired or already used")
+    if (redirectUri && redirectUri !== code.redirect_uri) throw invalidGrant("redirect_uri does not match")
 
     return this.issueTokens(client.client_id, code.scopes, resource?.href ?? code.resource)
   }
@@ -150,7 +161,7 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
       [hash(refreshToken), client.client_id],
     )
     const token = rows[0]
-    if (!token) throw new InvalidGrantError("Refresh token is invalid, expired or already used")
+    if (!token) throw invalidGrant("Refresh token is invalid, expired or already used")
 
     // A refresh may narrow the scopes it was granted, never widen them.
     const granted: string[] = token.scopes
@@ -166,7 +177,7 @@ export class PostgresOAuthProvider implements OAuthServerProvider {
       [hash(token)],
     )
     const found = rows[0]
-    if (!found) throw new InvalidTokenError("Token is invalid or expired")
+    if (!found) throw new OAuthError(OAuthErrorCode.InvalidToken, "Token is invalid or expired")
 
     return {
       token,

@@ -24,7 +24,7 @@ The tools are the easy part. What takes the time is everything around them:
 
 ### Deployment Dependencies
 
-- [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) 1.32.0 — server, Streamable HTTP transport, OAuth endpoints
+- [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) 2.3.0 — server, Streamable HTTP handler, bearer-token verification and OAuth metadata; the OAuth endpoints themselves are in the repository, backed by Postgres
 - Node 24 and Express 5
 - Postgres — OAuth clients, authorization codes, tokens, and the example table
 - [Source repository](https://github.com/ak40u/mcp-server-railway-starter)
@@ -38,7 +38,7 @@ Every version is pinned, and the choices below are the ones that took a deployme
 - **Authorization codes are single-use**, enforced by marking a code consumed in the same statement that reads it. A replay finds nothing to update — unlike a check-then-write, which two concurrent requests can both pass.
 - **Refresh rotates.** Using a refresh token revokes it and issues a new pair; a refresh may narrow its scopes, never widen them.
 - **Login is rate limited** — ten attempts per address per fifteen minutes, counted in Postgres so the limit holds across replicas instead of per process. The password is compared in constant time, over hashes, so neither its content nor its length leaks through timing.
-- **`trust proxy` is on.** Railway terminates TLS at its edge; without it Express builds `http://` redirect URLs and OAuth clients reject the mismatch.
+- **`trust proxy` is set to one hop.** Railway terminates TLS at its edge, through exactly one proxy; without it Express builds `http://` redirect URLs and OAuth clients reject the mismatch. A hop count, rather than trusting everything, also means a client cannot choose its own address for the rate limits with an `X-Forwarded-For` header.
 - **The issuer comes from `RAILWAY_PUBLIC_DOMAIN`.** OAuth metadata has to name the exact origin clients reach, so the template derives it rather than asking you to type it twice.
 - **The server refuses to start on a bad configuration** — a missing password, a short one, no database — instead of failing later inside a request.
 - **A health check that means something.** `/health` queries Postgres, so a broken database surfaces as an unhealthy deployment rather than a server that answers cheerfully and fails on every tool call.
